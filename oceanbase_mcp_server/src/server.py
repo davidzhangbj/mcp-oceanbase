@@ -61,7 +61,6 @@ def list_tables() -> str:
         return "Failed to list tables"
 
 
-@app.tool(name="configure_db_connection")
 def configure_db_connection(
     host: Optional[str] = None,
     port: Optional[int] = None,
