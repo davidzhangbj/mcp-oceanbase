@@ -20,7 +20,7 @@ on:
         default: 'info'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   release-build:
