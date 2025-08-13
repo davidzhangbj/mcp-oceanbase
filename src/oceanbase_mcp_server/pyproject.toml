@@ -1,0 +1,35 @@
+[project]
+name = "oceanbase_mcp_server"
+version = "0.1.0"
+description = "A Model Context Protocol (MCP) server that enables secure interaction with OceanBase databases. This server allows AI assistants to list tables, read data, and execute SQL queries through a controlled interface, making database exploration and analysis safer and more structured."
+readme = "../../doc/oceanbase_mcp_server.md"
+license = { file = "../..LICENSE" }
+requires-python = ">=3.11"
+dependencies = [
+    "mcp[cli]>=1.0.0",
+    "fastmcp>=2.5.1",
+    "mysql-connector-python>=9.1.0",
+    "python-dotenv",
+    "beautifulsoup4>=4.13.3",
+    "certifi>=2025.4.26",
+    "requests"
+]
+
+[[project.authors]]
+name = "OceanBase"
+email = "open_contact@oceanbase.com"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+include = [
+    "**/*.py"
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[project.scripts]
+oceanbase_mcp_server = "oceanbase_mcp_server:main"
