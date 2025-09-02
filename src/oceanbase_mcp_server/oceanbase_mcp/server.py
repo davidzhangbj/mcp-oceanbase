@@ -11,6 +11,8 @@ from mysql.connector import Error, connect
 from bs4 import BeautifulSoup
 import certifi
 import ssl
+from pyobvector import ObVecClient, MatchAgainst, l2_distance, inner_product, cosine_distance
+from sqlalchemy.sql.functions import FunctionElement
 
 # Configure logging
 logging.basicConfig(
@@ -117,7 +119,8 @@ def configure_db_connection(
     }
 
     # Check if all required parameters are provided
-    missing_params = [key for key in ["user", "database"] if not config.get(key)]
+    missing_params = [key for key in [
+        "user", "database"] if not config.get(key)]
     if missing_params:
         logger.error(
             "Missing required database configuration. Please check the following parameters: %s",
@@ -366,7 +369,8 @@ def get_ob_doc_content(doc_url: str, doc_id: str) -> dict:
         "Referer": "https://www.oceanbase.com/",
     }
     doc_api_url = "https://cn-wan-api.oceanbase.com/wanApi/forum/docCenter/productDocFile/v4/docDetails"
-    req = request.Request(doc_api_url, data=doc_param, headers=headers, method="POST")
+    req = request.Request(doc_api_url, data=doc_param,
+                          headers=headers, method="POST")
     # Make an SSL context with certifi to fix HTTPS errors.
     context = ssl.create_default_context(cafile=certifi.where())
     try:
@@ -409,6 +413,172 @@ def get_ob_doc_content(doc_url: str, doc_id: str) -> dict:
         return {"result": "No results were found"}
 
 
+@app.tool()
+def oceanbase_text_search(
+    table_name: str,
+    full_text_search_column_name: list[str],
+    full_text_search_expr: str,
+    other_where_clause: Optional[list[str]] = None,
+    limit: int = 5,
+    output_column_name: Optional[list[str]] = None,
+) -> str:
+    """
+    Search for documents using full text search in an OceanBase table.
+
+    Args:
+        table_name: Name of the table to search.
+        full_text_search_column_name: Specify the columns to be searched in full text.
+        full_text_search_expr: Specify the keywords or phrases to search for.
+        other_where_clause: Other WHERE condition query statements except full-text search.
+        limit: Maximum number of results to return.
+        output_column_name: columns to include in results.
+    """
+    logger.info(
+        f"Calling tool: oceanbase_text_search  with arguments: {table_name}, {full_text_search_column_name}, {full_text_search_expr}"
+    )
+    config = configure_db_connection()
+    client = ObVecClient(
+        uri=config['host']+":"+config['port'],
+        user=config['user'],
+        password=config.get('password', ''),
+        db_name=config.get('database', '')
+    )
+    where_clause = [MatchAgainst(
+        full_text_search_expr, *full_text_search_column_name)]
+    for item in other_where_clause or []:
+        where_clause.append(item)
+    results = client.get(
+        table_name=table_name,
+        ids=None,
+        where_clause=where_clause,
+        output_column_name=output_column_name,
+        n_limits=limit
+    )
+    output = f"Search results for '{full_text_search_expr}'"
+    if other_where_clause:
+        output += " and " + ",".join(other_where_clause)
+    output += f" in table '{table_name}':\n\n"
+    for result in results:
+        output += f"{result}\n\n"
+    return output
+
+
+@app.tool()
+def oceabase_vector_search(
+    table_name: str,
+    vector_data: list[float],
+    vec_column_name: str = "vector",
+    distance_func: Optional[str] = "l2",
+    with_distance: Optional[bool] = True,
+    topk: int = 5,
+    output_column_name: Optional[list[str]] = None,
+) -> str:
+    """
+    Perform vector similarity search on an OceanBase table.
+
+    Args:
+        table_name: Name of the table to search.
+        vector_data: Query vector.
+        vec_column_name: column name containing vectors to search.
+        distance_func: The index distance algorithm used when comparing the distance between two vectors.
+        with_distance: Whether to output distance data.
+        topk: Number of results returned.
+        output_column_name: Returned table fields.
+    """
+    logger.info(
+        f"Calling tool: oceabase_vector_search  with arguments: {table_name}, {vector_data[:10]}, {vec_column_name}"
+    )
+    config = configure_db_connection()
+    client = ObVecClient(
+        uri=config['host']+":"+config['port'],
+        user=config['user'],
+        password=config.get('password', ''),
+        db_name=config.get('database', '')
+    )
+    match distance_func:
+        case 'l2':
+            search_distance_func = l2_distance
+        case 'inner product':
+            search_distance_func = inner_product
+        case 'cosine':
+            search_distance_func = cosine_distance
+        case _:
+            raise ValueError("Unkown distance function")
+
+    results = client.ann_search(
+        table_name=table_name,
+        vec_data=vector_data,
+        vec_column_name=vec_column_name,
+        distance_func=search_distance_func,
+        with_dist=with_distance,
+        topk=topk,
+        output_column_names=output_column_name
+    )
+    output = f"Vector search results for '{table_name}:\n\n'"
+    for result in results:
+        output += f"{result}\n\n"
+    return output
+
+
+@app.tool()
+def oceanbase_hybrid_search(
+    table_name: str,
+    vector_data: list[float],
+    vec_column_name: str = "vector",
+    distance_func: Optional[str] = "l2",
+    with_distance: Optional[bool] = True,
+    filter_expr: Optional[list[str]] = None,
+    topk: int = 5,
+    output_column_name: Optional[list[str]] = None,
+)->str:
+    """
+    Perform hybird search combining relational condition filtering(that is, scalar) and vector search.
+
+    Args:
+        table_name: Name of the table to search.
+        vector_data: Query vector.
+        vec_column_name: column name containing vectors to search.
+        distance_func: The index distance algorithm used when comparing the distance between two vectors.
+        with_distance: Whether to output distance data.
+        filter_expr: Scalar conditions requiring filtering.
+        topk: Number of results returned.
+        output_column_name: Returned table fields.
+    """
+    logger.info(
+        f"Calling tool: oceabase_vector_search  with arguments: {table_name}, {vector_data[:10]}, {vec_column_name}"
+    )
+    config = configure_db_connection()
+    client = ObVecClient(
+        uri=config['host']+":"+config['port'],
+        user=config['user'],
+        password=config.get('password', ''),
+        db_name=config.get('database', '')
+    )
+    match distance_func:
+        case 'l2':
+            search_distance_func = l2_distance
+        case 'inner product':
+            search_distance_func = inner_product
+        case 'cosine':
+            search_distance_func = cosine_distance
+        case _:
+            raise ValueError("Unkown distance function")
+
+    results = client.ann_search(
+        table_name=table_name,
+        vec_data=vector_data,
+        vec_column_name=vec_column_name,
+        distance_func=search_distance_func,
+        with_dist=with_distance,
+        where_clause=filter_expr,
+        topk=topk,
+        output_column_names=output_column_name
+    )
+    output = f"Hybrid search results for '{table_name}:\n\n'"
+    for result in results:
+        output += f"{result}\n\n"
+    return output
+
 def main():
     """Main entry point to run the MCP server."""
     parser = argparse.ArgumentParser()
@@ -418,8 +588,10 @@ def main():
         default="stdio",
         help="Specify the MCP server transport type as stdio or sse.",
     )
-    parser.add_argument("--host", default="127.0.0.1", help="SSE Host to bind to")
-    parser.add_argument("--port", type=int, default=8000, help="SSE Port to listen on")
+    parser.add_argument("--host", default="127.0.0.1",
+                        help="SSE Host to bind to")
+    parser.add_argument("--port", type=int, default=8000,
+                        help="SSE Port to listen on")
     args = parser.parse_args()
     transport = args.transport
     logger.info(f"Starting OceanBase MCP server with {transport} mode...")

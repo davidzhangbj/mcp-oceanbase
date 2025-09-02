@@ -49,11 +49,13 @@ export OB_DATABASE=your_database
 ```
 2. Configure in the .env file
 Create an .env file in the directory where the OceanBase MCP Server command is executed, and fill in the following information
+```bash
 OB_HOST=localhost     # Database host
 OB_PORT=2881         # Optional: Database port (defaults to 2881 if not specified)
 OB_USER=your_username
 OB_PASSWORD=your_password
 OB_DATABASE=your_database
+```
 ## Usage
 
 ### stdio Mode

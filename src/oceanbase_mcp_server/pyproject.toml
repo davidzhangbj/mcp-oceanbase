@@ -21,7 +21,8 @@ dependencies = [
     "python-dotenv",
     "beautifulsoup4>=4.13.3",
     "certifi>=2025.4.26",
-    "requests"
+    "requests",
+    "pyobvector>=0.2.15"
 ]
 
 [project.scripts]
