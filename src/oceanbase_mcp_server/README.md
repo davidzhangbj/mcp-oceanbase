@@ -8,6 +8,7 @@ This server allows AI assistants to list tables, read data, and execute SQL quer
 - List available OceanBase tables as resources
 - Read table contents
 - Execute SQL queries with proper error handling
+- Full text search, vector search and hybrid search
 - Secure database access through environment variables
 - Comprehensive logging
 
@@ -19,6 +20,9 @@ This server allows AI assistants to list tables, read data, and execute SQL quer
 - [✔️] Get [ASH](https://www.oceanbase.com/docs/common-oceanbase-database-cn-1000000002013776) report
 - [✔️] Search OceanBase document from official website.
   This tool is experimental because the API on the official website may change.
+- [✔️] Search for documents using full text search in an OceanBase table
+- [✔️] Perform vector similarity search on an OceanBase table
+- [✔️] Perform hybird search combining relational condition filtering(that is, scalar) and vector search
 
 ## Install from PyPI Repository
 
@@ -90,6 +94,9 @@ Within the mcp-oceanbase directory, execute the following command, the port can 
 oceanbase_mcp_server --transport sse --port 8000
 ```
 The URL address for the general SSE mode configuration is `http://ip:port/sse`
+
+## Examples
+Please refer to the [GitHub documentation](https://github.com/oceanbase/mcp-oceanbase/blob/main/doc/oceanbase_mcp_server.md).
 
 ## Security Considerations
 

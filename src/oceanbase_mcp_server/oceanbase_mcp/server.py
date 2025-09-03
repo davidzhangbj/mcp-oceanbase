@@ -12,7 +12,9 @@ from bs4 import BeautifulSoup
 import certifi
 import ssl
 from pyobvector import ObVecClient, MatchAgainst, l2_distance, inner_product, cosine_distance
-from sqlalchemy.sql.functions import FunctionElement
+from sqlalchemy import text
+from openai import OpenAI
+import ast
 
 # Configure logging
 logging.basicConfig(
@@ -221,6 +223,11 @@ def get_ob_ash_report(
         The module where the SESSION is located during sampling (PARSE, EXECUTE, PL, etc.)
         SESSION status records, such as SESSION MODULE, ACTION, CLIENT ID
     This will be very useful when you perform performance analysis.RetryClaude can make mistakes. Please double-check responses.
+
+    Args:
+        start_time: Sample Start Time,Format: yyyy-MM-dd HH:MM:ss.
+        end_time: Sample End Time,Format: yyyy-MM-dd HH:MM:ss.
+        tenant_id: Used to specify the tenant ID for generating the ASH Report. Leaving this field blank or setting it to NULL indicates no restriction on the TENANT_ID.
     """
     logger.info(
         f"Calling tool: get_ob_ash_report  with arguments: {start_time}, {end_time}, {tenant_id}"
@@ -256,7 +263,7 @@ def get_current_tenant() -> str:
     logger.info("Calling tool: get_current_tenant")
     sql_query = "show tenant"
     try:
-        result = execute_sql(sql_query)
+        result = ast.literal_eval(execute_sql(sql_query))
         logger.info(f"Current tenant: {result}")
         return result[0][0]
     except Error as e:
@@ -271,11 +278,12 @@ def get_all_server_nodes():
     You need to be sys tenant to get all server nodes.
     """
     tenant = get_current_tenant()
+    print("tentant:",tenant)
     if tenant != "sys":
         raise ValueError("Only sys tenant can get all server nodes")
 
     logger.info("Calling tool: get_all_server_nodes")
-    sql_query = "select * from DBA_OB_SERVERS"
+    sql_query = "select * from oceanbase.DBA_OB_SERVERS"
     try:
         return execute_sql(sql_query)
     except Error as e:
@@ -446,7 +454,7 @@ def oceanbase_text_search(
     where_clause = [MatchAgainst(
         full_text_search_expr, *full_text_search_column_name)]
     for item in other_where_clause or []:
-        where_clause.append(item)
+        where_clause.append(text(item))
     results = client.get(
         table_name=table_name,
         ids=None,
@@ -530,7 +538,7 @@ def oceanbase_hybrid_search(
     filter_expr: Optional[list[str]] = None,
     topk: int = 5,
     output_column_name: Optional[list[str]] = None,
-)->str:
+) -> str:
     """
     Perform hybird search combining relational condition filtering(that is, scalar) and vector search.
 
@@ -540,12 +548,13 @@ def oceanbase_hybrid_search(
         vec_column_name: column name containing vectors to search.
         distance_func: The index distance algorithm used when comparing the distance between two vectors.
         with_distance: Whether to output distance data.
-        filter_expr: Scalar conditions requiring filtering.
+        filter_expr: Scalar conditions requiring filtering in where clause.
         topk: Number of results returned.
-        output_column_name: Returned table fields.
+        output_column_name: Returned table fields,unless explicitly requested, please do not provide.
     """
     logger.info(
-        f"Calling tool: oceabase_vector_search  with arguments: {table_name}, {vector_data[:10]}, {vec_column_name}"
+        f"""Calling tool: oceanbase_hybrid_search  with arguments: {table_name}, {vector_data[:10]}, {vec_column_name}
+        ,{filter_expr}"""
     )
     config = configure_db_connection()
     client = ObVecClient(
@@ -554,7 +563,7 @@ def oceanbase_hybrid_search(
         password=config.get('password', ''),
         db_name=config.get('database', '')
     )
-    match distance_func:
+    match distance_func.lower():
         case 'l2':
             search_distance_func = l2_distance
         case 'inner product':
@@ -563,14 +572,16 @@ def oceanbase_hybrid_search(
             search_distance_func = cosine_distance
         case _:
             raise ValueError("Unkown distance function")
-
+    where_clause = []
+    for item in filter_expr or []:
+        where_clause.append(text(item))
     results = client.ann_search(
         table_name=table_name,
         vec_data=vector_data,
         vec_column_name=vec_column_name,
         distance_func=search_distance_func,
         with_dist=with_distance,
-        where_clause=filter_expr,
+        where_clause=where_clause,
         topk=topk,
         output_column_names=output_column_name
     )
@@ -578,6 +589,7 @@ def oceanbase_hybrid_search(
     for result in results:
         output += f"{result}\n\n"
     return output
+
 
 def main():
     """Main entry point to run the MCP server."""
