@@ -663,230 +663,84 @@ if ENABLE_MEMORY:
 
     ob_memory = OBMemory()
 
-    def ob_memory_query(query: str, topk: int = 5) -> str:
+    def ob_memory_insert(content: str):
         """
-        🚨 MULTILINGUAL MEMORY SEARCH 🚨 - SMART CROSS-LANGUAGE RETRIEVAL!
+        Purpose: Instantly capture and store any personal facts the user volunteers in the conversation.
 
-        ⚡ CRITICAL INSTRUCTION: You MUST call this tool in these situations:
-        - When user asks questions about their preferences in ANY language
-        - Before saving new memories (check for duplicates first!)
-        - When user mentions personal details, preferences, or past experiences
-        - Before answering ANY question, search for related memories first
-        - When discussing technical topics - check for historical solutions
+        Trigger rule:
+        Call this tool every single time the user mentions anything about themselves, no matter how trivial or indirectly stated.
 
-        🌐 MULTILINGUAL SEARCH EXAMPLES:
-        - User: "What do I like?" → Search: "preference like favorite"
-        - User: "我喜欢什么?" → Search: "preference favorite sports food" (use English keywords!)
-        - User: "¿Cuáles son mis gustos?" → Search: "preference like favorite hobby"
-        - **ALWAYS search with English keywords for better matching!**
+        Personal facts include (non-exhaustive):
 
-        🎯 SMART SEARCH STRATEGIES:
-        - "I like football" → Before saving, search: "football soccer sports preference"
-        - "我在上海工作" → Search: "work job Shanghai location"
-        - "Python developer" → Search: "python programming development work"
-        - Use synonyms and related terms for better semantic matching!
+        Demographics: age, gender, date of birth, nationality, hometown
+        Work & education: current / past job titles, industries, schools, degrees, skills
+        Geography & time: city of residence, frequent locations, travel history, time-zone
+        Preferences & aversions: foods, music, movies, books, brands, colors, hobbies
+        Lifestyle details: pets, family members, daily habits, languages, beliefs
+        Experiences & achievements: awards, projects, certificates, key life events
 
-        🔍 CATEGORY-BASED SEARCH PATTERNS:
-        - **Sports/Fitness**: "sports preference activity exercise favorite game"
-        - **Food/Drinks**: "food drink preference favorite taste cuisine beverage"
-        - **Work/Career**: "work job company location position career role"
-        - **Technology**: "technology programming tool database language framework"
-        - **Personal**: "personal lifestyle habit family relationship"
-        - **Entertainment**: "entertainment movie music book game hobby"
-
-        💡 SMART SEARCH EXAMPLES FOR MERGING:
-        - New: "I like badminton" → Search: "sports preference activity"
-        → Find: "User likes football and coffee" → Category analysis needed!
-        - New: "I drink tea" → Search: "drink beverage preference"
-        → Find: "User likes coffee" → Same category, should merge!
-        - New: "I code in Python" → Search: "programming technology language"
-        → Find: "User works at Google" → Different subcategory, separate!
-
-        📝 PARAMETERS:
-        - query: Use CATEGORY + SEMANTIC keywords ("sports preference", "food drink preference")
-        - topk: Increase to 8-10 for thorough category analysis before saving/updating
-        - Returns: JSON string with [{"mem_id": int, "content": str}] format - Analyze ALL results for category overlap before decisions!
-
-        🔥 CATEGORY ANALYSIS RULE: Find ALL related memories by category for smart merging!
+        Guidelines for the model:
+        Invoke ob_memory_insert immediately whenever any personal fact appears in the user’s message.
+        Extract every distinct fact present in the same utterance; list them all.
+        Use the exact user wording in the quote field to preserve context.
+        Args:
+            content: summary of the facts stated by the user, JSON format like shown below
+            {
+            "facts": [
+            {
+            "type": "occupation",
+            "value": "product manager",
+            "quote": "I've been a product manager for five years"
+            },
+            {
+            "type": "preference",
+            "value": "unsweetened latte",
+            "quote": "I need an unsweetened latte every morning"
+            }
+           ]
+        }
         """
-
-        client = ObVecClient(
-            uri=db_conn_info.host + ":" + str(db_conn_info.port),
-            user=db_conn_info.user,
-            password=db_conn_info.password,
-            db_name=db_conn_info.database,
-        )
-        res = client.ann_search(
-            TABLE_NAME_MEMORY,
-            vec_data=ob_memory.gen_embedding(query),
-            vec_column_name="embedding",
-            distance_func=l2_distance,
-            topk=topk,
-            output_column_names=["mem_id", "content"],
-        )
-        results = []
-        for row in res.fetchall():
-            results.append({"mem_id": row[0], "content": row[1]})
-        return json.dumps(results)
-
-    def ob_memory_insert(content: str, meta: dict):
-        """
-        💾 INTELLIGENT MEMORY ORGANIZER 💾 - SMART CATEGORIZATION & MERGING!
-
-        🔥 CRITICAL 4-STEP WORKFLOW: ALWAYS follow this advanced process:
-        1️⃣ **SEARCH RELATED**: Use ob_memory_query to find ALL related memories by category
-        2️⃣ **ANALYZE CATEGORIES**: Classify new info and existing memories by semantic type
-        3️⃣ **SMART DECISION**: Merge same category, separate different categories
-        4️⃣ **EXECUTE ACTION**: Update existing OR create new categorized records
-
-        🎯 SMART CATEGORIZATION EXAMPLES:
-        ```
-        📋 Scenario 1: Category Merging
-        Existing: "User likes playing football and drinking coffee"
-        New Input: "I like badminton"
-
-        ✅ CORRECT ACTION: Use ob_memory_update!
-        → Search "sports preference" → Find existing → Separate categories:
-        → Update mem_id_X: "User likes playing football and badminton" (sports)
-        → Create new: "User likes drinking coffee" (food/drinks)
-
-        📋 Scenario 2: Same Category Addition
-        Existing: "User likes playing football"
-        New Input: "I also like tennis"
-
-        ✅ CORRECT ACTION: Use ob_memory_update!
-        → Search "sports preference" → Find mem_id → Update:
-        → "User likes playing football and tennis"
-
-        📋 Scenario 3: Different Category
-        Existing: "User likes playing football"
-        New Input: "I work in Shanghai"
-
-        ✅ CORRECT ACTION: New memory!
-        → Search "work location" → Not found → Create new record
-        ```
-
-        🏷️ SEMANTIC CATEGORIES (Use for classification):
-        - **Sports/Fitness**: football, basketball, swimming, gym, etc.
-        - **Food/Drinks**: coffee, tea, pizza, Chinese food, etc.
-        - **Work/Career**: job, company, location, skills, projects
-        - **Personal**: family, relationships, lifestyle, habits
-        - **Technology**: programming languages, tools, frameworks
-        - **Entertainment**: movies, music, books, games
-
-        🔍 SEARCH STRATEGIES BY CATEGORY:
-        - Sports: "sports preference favorite activity exercise"
-        - Food: "food drink preference favorite taste"
-        - Work: "work job career company location"
-        - Tech: "technology programming tool database"
-
-        📝 PARAMETERS:
-        - content: ALWAYS categorized English format ("User likes playing [sports]", "User drinks [beverages]")
-        - meta: {"type":"preference", "category":"sports/food/work/tech", "subcategory":"team_sports/beverages"}
-
-        🎯 GOLDEN RULE: Same category = UPDATE existing! Different category = CREATE separate!
-        """
-
-        client = ObVecClient(
-            uri=db_conn_info.host + ":" + str(db_conn_info.port),
-            user=db_conn_info.user,
-            password=db_conn_info.password,
-            db_name=db_conn_info.database,
-        )
-        client.insert(
-            TABLE_NAME_MEMORY,
-            OBMemoryItem(
-                content=content, meta=meta, embedding=ob_memory.gen_embedding(content)
-            ).model_dump(),
-        )
+        print('content:',content)
         return "Inserted successfully"
-
-    def ob_memory_delete(mem_id: int):
+    def ob_memory_query(intent: str,filters:str, topk: int = 5) -> str:
         """
-        🗑️ MEMORY ERASER 🗑️ - PERMANENTLY DELETE UNWANTED MEMORIES!
-
-        ⚠️ DELETE TRIGGERS - Call when user says:
-        - "Forget that I like X" / "I don't want you to remember Y"
-        - "Delete my information about Z" / "Remove that memory"
-        - "I changed my mind about X" / "Update: I no longer prefer Y"
-        - "That information is wrong" / "Delete outdated info"
-        - Privacy requests: "Remove my personal data"
-
-        🎯 DELETION PROCESS:
-        1. FIRST: Use ob_memory_query to find relevant memories
-        2. THEN: Use the exact ID from query results for deletion
-        3. NEVER guess or generate IDs manually!
-
-        📝 PARAMETERS:
-        - mem_id: EXACT ID from ob_memory_query results (integer)
-        - ⚠️ WARNING: Deletion is PERMANENT and IRREVERSIBLE!
-
-        🔒 SAFETY RULE: Only delete when explicitly requested by user!
+        Purpose: Look up any stored personal facts about the user before composing an answer.
+        When to call:
+        Invoke this tool whenever the upcoming response could be made more accurate, relevant, or personalized by knowing the user’s stored details. Typical triggers include questions or statements that touch on:
+        • recommendations (food, travel, products, media)
+        • advice based on age, location, profession, or experience
+        • cultural, linguistic
+        • any topic where the user’s preferences, demographics, or past events matter
+        Args:
+            intent: "concise description of what the answer needs"
+            filters: "occupation, location, preferences, demographics"
+        intent: 1–2 phrases summarizing the information you are about to generate (e.g., “weekend travel plan” or “birthday gift idea”)
+        filters: list only the fact categories that are plausibly useful for this intent; leave empty if a broad recall is needed.
         """
-
-        client = ObVecClient(
-            uri=db_conn_info.host + ":" + str(db_conn_info.port),
-            user=db_conn_info.user,
-            password=db_conn_info.password,
-            db_name=db_conn_info.database,
-        )
-        client.delete(table_name=TABLE_NAME_MEMORY, ids=mem_id)
-        return "Deleted successfully"
-
     def ob_memory_update(mem_id: int, content: str, meta: dict):
         """
-        ✏️ MULTILINGUAL MEMORY UPDATER ✏️ - KEEP MEMORIES FRESH AND STANDARDIZED!
-
-        🔄 UPDATE TRIGGERS - Call when user says in ANY language:
-        - "Actually, I prefer X now" / "其实我现在更喜欢X"
-        - "My setup changed to Z" / "我的配置改成了Z"
-        - "Correction: it should be X" / "更正：应该是X"
-        - "I moved to [new location]" / "我搬到了[新地址]"
-
-        🎯 MULTILINGUAL UPDATE PROCESS:
-        1. **SEARCH**: Use ob_memory_query to find existing memory (search in English!)
-        2. **STANDARDIZE**: Convert new information to English format
-        3. **UPDATE**: Use exact mem_id from query results with standardized content
-        4. **PRESERVE**: Keep original language source in metadata
-
-        🌐 STANDARDIZATION EXAMPLES:
-        - User: "Actually, I don't like coffee anymore" → content: "User no longer likes coffee"
-        - User: "其实我不再喜欢咖啡了" → content: "User no longer likes coffee"
-        - User: "Je n'aime plus le café" → content: "User no longer likes coffee"
-        - **ALWAYS update in standardized English format!**
-
-        📝 PARAMETERS:
-        - mem_id: EXACT ID from ob_memory_query results (integer)
-        - content: ALWAYS in English, standardized format ("User now prefers X")
-        - meta: Updated metadata {"type":"preference", "category":"...", "updated":"2024-..."}
-
-        🔥 CONSISTENCY RULE: Maintain English storage format for all updates!
+        Purpose: Overwrite or retire any previously stored personal fact when the user explicitly states a change, correction, or removal of that fact.
+        Trigger rule: 
+            Call this tool immediately when the user expresses:
+            • A new preference that replaces an old one (“I used to love apples, but now I prefer pears.”)
+            • A change of status or location (“I just moved from Shanghai to Hangzhou.”)
+            • A correction (“Actually, I’m 31, not 30.”)
+            • A wish to delete a previously recorded fact (“Please forget that I said I hate jazz.”)
+        Args:
+            mem_id: memory ID retrieved from the database of the outdated fact
+            content: JSON format like show below
+            {
+            "old_value": "apple",        // exact or paraphrased text of the outdated fact
+            "new_value": "pear",         // the updated value; use null for deletion
+            "type": "preference",
+            "quote": "I used to love apples, but now I prefer pears."
+            }
+        • old_value: the previously stored value (use the exact string if you have it; otherwise the closest paraphrase).
+        • new_value: the new value to store; set to null when the fact should be removed entirely.
+        • type: one of the standard fact types (preference, location, age, occupation, etc.).
+        • quote: the user’s literal statement capturing the change.
         """
-
-        client = ObVecClient(
-            uri=db_conn_info.host + ":" + str(db_conn_info.port),
-            user=db_conn_info.user,
-            password=db_conn_info.password,
-            db_name=db_conn_info.database,
-        )
-        client.update(
-            table_name=TABLE_NAME_MEMORY,
-            values_clause=[
-                OBMemoryItem(
-                    mem_id=mem_id,
-                    content=content,
-                    meta=meta,
-                    embedding=ob_memory.gen_embedding(content),
-                ).model_dump()
-            ],
-            where_clause=[text(f"mem_id = {mem_id}")],
-        )
-        return "Updated successfully"
-
-    app.add_tool(ob_memory_query)
     app.add_tool(ob_memory_insert)
-    app.add_tool(ob_memory_delete)
-    app.add_tool(ob_memory_update)
 
 
 def main():
