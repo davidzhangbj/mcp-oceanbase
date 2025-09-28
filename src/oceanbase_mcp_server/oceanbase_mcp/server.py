@@ -739,6 +739,23 @@ if ENABLE_MEMORY:
         • new_value: the new value to store; set to null when the fact should be removed entirely.
         • type: one of the standard fact types (preference, location, age, occupation, etc.).
         • quote: the user’s literal statement capturing the change.
+        Example invocations:
+            User: “I’ve switched from iOS to Android.”
+            {
+            "old_value": "iOS",
+            "new_value": "Android",
+            "type": "preference",
+            "quote": "I've switched from iOS to Android."
+            }
+            User: “I don’t actually dislike dogs.”
+            {
+            "old_value": "dislikes dogs",
+            "new_value": null,
+            "type": "preference",
+            "quote": "I don't actually dislike dogs."
+            }
+        Guideline for the model:
+        Whenever you detect a temporal cue (now, currently, these days, recently, since, used to) or an explicit contradiction of a stored fact, invoke update_user_fact before giving any further response.
         """
     app.add_tool(ob_memory_insert)
 
