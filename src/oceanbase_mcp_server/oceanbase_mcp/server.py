@@ -49,7 +49,9 @@ class OBConnection(BaseModel):
 class OBMemoryItem(BaseModel):
     mem_id: int = None
     content: str
-    meta: dict
+    quote: str
+    type: str
+    meta: dict = None
     embedding: List[float]
 
 
@@ -589,6 +591,7 @@ def oceanbase_hybrid_search(
     )
     output = f"Hybrid search results for '{table_name}:\n\n'"
     for result in results:
+        print(str(result))
         output += str(result) + "\n\n"
     return output
 
@@ -619,7 +622,7 @@ if ENABLE_MEMORY:
             Generate embedding cient.
             """
             if EMBEDDING_MODEL_PROVIDER == "huggingface":
-                os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+                # os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
                 from langchain_huggingface import HuggingFaceEmbeddings
 
                 logger.info(f"Using HuggingFaceEmbeddings model: {EMBEDDING_MODEL_NAME}")
@@ -647,8 +650,10 @@ if ENABLE_MEMORY:
                 cols = [
                     Column("mem_id", Integer, primary_key=True, autoincrement=True),
                     Column("content", String(8000)),
-                    Column("embedding", VECTOR(self.embedding_dimension)),
+                    Column("quote", String(8000)),
+                    Column("type", String(100)),
                     Column("meta", JSON),
+                    Column("embedding", VECTOR(self.embedding_dimension)),
                 ]
                 client.create_table(TABLE_NAME_MEMORY, columns=cols)
 
@@ -663,7 +668,7 @@ if ENABLE_MEMORY:
 
     ob_memory = OBMemory()
 
-    def ob_memory_insert(content: str):
+    def ob_memory_insert(facts: str):
         """
         Purpose: Instantly capture and store any personal facts the user volunteers in the conversation.
 
@@ -680,11 +685,11 @@ if ENABLE_MEMORY:
         Experiences & achievements: awards, projects, certificates, key life events
 
         Guidelines for the model:
-        Invoke ob_memory_insert immediately whenever any personal fact appears in the user’s message.
+        Invoke ob_memory_insert immediately whenever any personal fact appears in the user's message.
         Extract every distinct fact present in the same utterance; list them all.
         Use the exact user wording in the quote field to preserve context.
         Args:
-            content: summary of the facts stated by the user, JSON format like shown below
+            facts: JSON string containing facts to be stored, format like shown below
             {
             "facts": [
             {
@@ -700,9 +705,63 @@ if ENABLE_MEMORY:
            ]
         }
         """
-        print('content:',content)
-        return "Inserted successfully"
-    def ob_memory_query(intent: str,filters:str, topk: int = 5) -> str:
+        logger.info(f"Inserting memory facts: {facts}")
+
+        try:
+            # Parse the JSON content
+            facts_data = json.loads(facts)
+            facts = facts_data.get("facts", [])
+
+            if not facts:
+                logger.warning("No facts found")
+                return "No facts to insert"
+
+            client = ObVecClient(
+                uri=db_conn_info.host + ":" + str(db_conn_info.port),
+                user=db_conn_info.user,
+                password=db_conn_info.password,
+                db_name=db_conn_info.database,
+            )
+
+            inserted_count = 0
+            for fact in facts:
+                try:
+                    # Extract fact details
+                    fact_type = fact.get("type", "")
+                    fact_value = fact.get("value", "")
+                    fact_quote = fact.get("quote", "")
+
+                    # Generate embedding for the fact value
+                    embedding = ob_memory.gen_embedding(fact_value)
+
+                    # Create memory item with direct field mapping
+                    memory_item = OBMemoryItem(
+                        content=fact_value,  # value -> content field
+                        quote=fact_quote,  # quote -> quote field
+                        type=fact_type,  # type -> type field
+                        embedding=embedding,
+                    )
+
+                    # Insert into database
+                    client.insert(TABLE_NAME_MEMORY, memory_item.model_dump())
+                    inserted_count += 1
+
+                    logger.info(f"Inserted fact: {fact_type} - {fact_value}")
+
+                except Exception as e:
+                    logger.error(f"Failed to insert fact {fact}: {str(e)}")
+                    continue
+
+            return f"Successfully inserted {inserted_count} facts"
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse JSON facts_json: {str(e)}")
+            return f"Error: Invalid JSON format - {str(e)}"
+        except Exception as e:
+            logger.error(f"Unexpected error in ob_memory_insert: {str(e)}")
+            return f"Error: {str(e)}"
+
+    def ob_memory_query(intent: str, filters: str, topk: int = 5) -> str:
         """
         Purpose: Look up any stored personal facts about the user before composing an answer.
         When to call:
@@ -717,31 +776,73 @@ if ENABLE_MEMORY:
         intent: 1–2 phrases summarizing the information you are about to generate (e.g., “weekend travel plan” or “birthday gift idea”)
         filters: list only the fact categories that are plausibly useful for this intent; leave empty if a broad recall is needed.
         """
-    def ob_memory_update(mem_id: int, content: str, meta: dict):
+        # Convert filters string to list of WHERE expressions
+        where_clause = []
+        if filters and filters.strip():
+            filter_types = [f.strip() for f in filters.split(",") if f.strip()]
+            for filter_type in filter_types:
+                where_clause.append(text(f"type='{filter_type}'"))
+
+        client = ObVecClient(
+            uri=db_conn_info.host + ":" + str(db_conn_info.port),
+            user=db_conn_info.user,
+            password=db_conn_info.password,
+            db_name=db_conn_info.database,
+        )
+        res = client.ann_search(
+            table_name=TABLE_NAME_MEMORY,
+            vec_data=ob_memory.gen_embedding(intent),
+            vec_column_name="embedding",
+            distance_func=l2_distance,
+            with_dist=True,
+            where_clause=where_clause,
+            topk=topk,
+            output_column_names=["mem_id", "content", "type"],
+        )
+        results = []
+        for row in res.fetchall():
+            results.append({"mem_id": row[0], "content": row[1], "type": row[2]})
+        return json.dumps(results)
+
+    def ob_memory_update(new_facts: str):
         """
         Purpose: Overwrite or retire any previously stored personal fact when the user explicitly states a change, correction, or removal of that fact.
-        Trigger rule: 
+        Important:
+            • Before calling this method, you must first call the ob_memory_query method to obtain the mem_id of the old fact.
+        Trigger rule:
             Call this tool immediately when the user expresses:
             • A new preference that replaces an old one (“I used to love apples, but now I prefer pears.”)
             • A change of status or location (“I just moved from Shanghai to Hangzhou.”)
             • A correction (“Actually, I’m 31, not 30.”)
             • A wish to delete a previously recorded fact (“Please forget that I said I hate jazz.”)
         Args:
-            mem_id: memory ID retrieved from the database of the outdated fact
-            content: JSON format like show below
+            new_facts: JSON string containing new facts to be update, JSON format like show below
             {
-            "old_value": "apple",        // exact or paraphrased text of the outdated fact
-            "new_value": "pear",         // the updated value; use null for deletion
-            "type": "preference",
-            "quote": "I used to love apples, but now I prefer pears."
+                "new_facts":[
+                    {
+                        "mem_id": 1, // integer,memory ID retrieved from the database of the outdated fact
+                        "old_value": "apple",        // exact or paraphrased text of the outdated fact
+                        "new_value": "pear",         // the updated value; use null for deletion
+                        "type": "preference",
+                        "quote": "I used to love apples, but now I prefer pears."
+                    },
+                    {
+                        "mem_id": 2,
+                        "old_value": "iOS", // exact or paraphrased text of the outdated fact
+                        "new_value": "Android",
+                        "type": "preference",
+                        "quote": "I've switched from iOS to Android."
+                    }
+                ]
             }
-        • old_value: the previously stored value (use the exact string if you have it; otherwise the closest paraphrase).
-        • new_value: the new value to store; set to null when the fact should be removed entirely.
-        • type: one of the standard fact types (preference, location, age, occupation, etc.).
-        • quote: the user’s literal statement capturing the change.
+            • old_value: the previously stored value (use the exact string if you have it; otherwise the closest paraphrase).
+            • new_value: the new value to store; set to null when the fact should be removed entirely.
+            • type: one of the standard fact types (preference, location, age, occupation, etc.).
+            • quote: the user’s literal statement capturing the change.
         Example invocations:
             User: “I’ve switched from iOS to Android.”
             {
+            "mem_id": 1,
             "old_value": "iOS",
             "new_value": "Android",
             "type": "preference",
@@ -749,15 +850,84 @@ if ENABLE_MEMORY:
             }
             User: “I don’t actually dislike dogs.”
             {
+            "mem_id": 2,
             "old_value": "dislikes dogs",
             "new_value": null,
             "type": "preference",
             "quote": "I don't actually dislike dogs."
             }
         Guideline for the model:
-        Whenever you detect a temporal cue (now, currently, these days, recently, since, used to) or an explicit contradiction of a stored fact, invoke update_user_fact before giving any further response.
+        
+        • Whenever you detect a temporal cue (now, currently, these days, recently, since, used to) or an explicit contradiction of a stored fact, invoke ob_memory_update before giving any further response.
         """
+        logger.info(f"Updating memory content: {new_facts}")
+
+        try:
+            # Parse the JSON content
+            new_facts_data = json.loads(new_facts)
+            new_facts = new_facts_data.get("new_facts", [])
+            if not new_facts:
+                logger.warning("No new facts found")
+                return "No new facts to update"
+
+            client = ObVecClient(
+                uri=db_conn_info.host + ":" + str(db_conn_info.port),
+                user=db_conn_info.user,
+                password=db_conn_info.password,
+                db_name=db_conn_info.database,
+            )
+
+            update_count = 0
+            delete_count = 0
+            for new_fact in new_facts:
+                content = new_fact.get("new_value")
+                if content:
+                    try:
+                        client.update(
+                            table_name=TABLE_NAME_MEMORY,
+                            values_clause=[
+                                OBMemoryItem(
+                                    content=content,
+                                    type=new_fact.get("type"),
+                                    quote=new_fact.get("quote"),
+                                    embedding=ob_memory.gen_embedding(content),
+                                ).model_dump()
+                            ],
+                            where_clause=[text(f"mem_id = {new_fact.get('mem_id')}")],
+                        )
+                        update_count += 1
+                    except Exception as e:
+                        logger.error(f"Failed to update fact:{new_fact},error:{str(e)}")
+                        continue
+                else:
+                    try:
+                        client.delete(
+                            table_name=TABLE_NAME_MEMORY, ids=new_fact.get("mem_id")
+                        )
+                        delete_count += 1
+                    except Exception as e:
+                        logger.error(f"Failed to delete fact:{new_fact},error:{str(e)}")
+                        continue
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse JSON facts_json:{str(e)}")
+            return f"Error: Invalid JSON format - {str(e)}"
+        except Exception as e:
+            logger.error(f"Unexpected error in ob_memory_update:{str(e)}")
+            return f"Error:{str(e)}"
+        parts = []
+        if update_count > 0:
+            parts.append(f"update {update_count} facts")
+        if delete_count > 0:
+            parts.append(f"delete {delete_count} facts")
+        if parts:
+            message = "Successfully " + ",".join(parts)
+        else:
+            message = "No facts were updated or deleted"
+        return message
+
     app.add_tool(ob_memory_insert)
+    app.add_tool(ob_memory_query)
+    app.add_tool(ob_memory_update)
 
 
 def main():
