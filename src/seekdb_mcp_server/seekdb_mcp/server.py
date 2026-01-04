@@ -1972,6 +1972,453 @@ def import_csv_file_to_seekdb(filePath: str, columnNumberForVecotor: Optional[in
 
 
 @app.tool()
+def index_code_directory(
+    directory: str,
+    collection_name: str = "code_index",
+    file_extensions: Optional[list[str]] = None,
+    chunk_by: str = "file",
+    exclude_dirs: Optional[list[str]] = None,
+    max_chunk_size: int = 8000,
+) -> str:
+    """
+    Index code files from a directory into seekdb for AI Coding assistance.
+
+    This tool scans a directory for code files, parses them into meaningful chunks,
+    and stores them in a vector collection for semantic code search. This enables
+    AI assistants to search for existing code by meaning, find similar implementations.
+
+    Args:
+        directory: The path to the directory to index. Will recursively scan subdirectories.
+        collection_name: The name of the collection to store code chunks. Default is "code_index".
+                         If the collection doesn't exist, it will be created automatically.
+        file_extensions: List of file extensions to include (e.g., [".py", ".js", ".ts"]).
+                         Default includes common programming languages:
+                         [".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".go", ".rs", ".cpp", ".c", ".h", ".cs", ".rb", ".php", ".sql"]
+        chunk_by: How to split code into chunks. Options:
+                  - "file": Entire file as one chunk (default, good for small files)
+                  - "function": Split by top-level functions/classes (requires AST parsing)
+                  - "lines": Split by line count (uses max_chunk_size as line limit)
+        exclude_dirs: List of directory names to exclude (e.g., ["node_modules", ".git", "__pycache__"]).
+                      Default excludes: ["node_modules", ".git", "__pycache__", "venv", ".venv", "dist", "build", ".next"]
+        max_chunk_size: Maximum chunk size in characters (for "lines" mode) or lines (default 8000 chars).
+
+    Returns:
+        A JSON string containing:
+        - success: Whether the indexing was successful
+        - collection_name: The name of the collection used
+        - files_indexed: Number of files indexed
+        - chunks_created: Number of code chunks created
+        - error: Error message if failed
+
+    Examples:
+        - Index a Python project:
+          index_code_directory("/path/to/my_project", collection_name="my_project_code", file_extensions=[".py"])
+
+        - Index with function-level chunking:
+          index_code_directory("/path/to/project", chunk_by="function")
+
+        - Index JavaScript/TypeScript project:
+          index_code_directory("/path/to/frontend", file_extensions=[".js", ".ts", ".jsx", ".tsx"])
+
+    Use Cases:
+        1. AI Coding Assistant: Search for existing utility functions before writing new ones
+        2. Code Review: Find similar patterns across the codebase
+        3. Refactoring: Identify code duplication and opportunities for abstraction
+        4. Documentation: Understand codebase structure through semantic search
+    """
+    logger.info(
+        f"Calling tool: index_code_directory with arguments: directory={directory}, collection_name={collection_name}"
+    )
+    result = {
+        "directory": directory,
+        "collection_name": collection_name,
+        "success": False,
+        "files_indexed": 0,
+        "chunks_created": 0,
+        "error": None,
+    }
+
+    # Default file extensions for common programming languages
+    default_extensions = [
+        ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".go", ".rs",
+        ".cpp", ".c", ".h", ".hpp", ".cs", ".rb", ".php", ".sql",
+        ".swift", ".kt", ".scala", ".r", ".m", ".mm", ".vue", ".svelte",
+        ".sh", ".bash", ".zsh", ".ps1", ".yaml", ".yml", ".json", ".xml",
+        ".html", ".css", ".scss", ".sass", ".less", ".md", ".rst", ".txt"
+    ]
+    extensions = file_extensions if file_extensions else default_extensions
+
+    # Default directories to exclude
+    default_exclude = [
+        "node_modules", ".git", "__pycache__", "venv", ".venv",
+        "dist", "build", ".next", ".cache", "coverage", ".idea",
+        ".vscode", "target", "out", "bin", "obj", ".gradle"
+    ]
+    exclude = exclude_dirs if exclude_dirs else default_exclude
+
+    try:
+        # Check if directory exists
+        if not os.path.exists(directory):
+            result["error"] = f"Directory not found: {directory}"
+            return json.dumps(result, ensure_ascii=False)
+
+        if not os.path.isdir(directory):
+            result["error"] = f"Path is not a directory: {directory}"
+            return json.dumps(result, ensure_ascii=False)
+
+        # Check if collection exists, create if not
+        if not client.has_collection(collection_name):
+            logger.info(f"Collection '{collection_name}' does not exist, creating...")
+            create_result_str = create_collection(collection_name)
+            create_result = json.loads(create_result_str)
+            if not create_result.get("success"):
+                result["error"] = f"Failed to create collection: {create_result.get('error')}"
+                return json.dumps(result, ensure_ascii=False)
+
+        # Collect all code files
+        code_files = []
+        for root, dirs, files in os.walk(directory):
+            # Filter out excluded directories
+            dirs[:] = [d for d in dirs if d not in exclude]
+
+            for file in files:
+                # Check file extension
+                ext = os.path.splitext(file)[1].lower()
+                if ext in extensions:
+                    full_path = os.path.join(root, file)
+                    code_files.append(full_path)
+
+        if not code_files:
+            result["error"] = f"No code files found in {directory} with extensions {extensions}"
+            return json.dumps(result, ensure_ascii=False)
+
+        logger.info(f"Found {len(code_files)} code files to index")
+
+        # Process files and create chunks
+        all_ids = []
+        all_documents = []
+        all_metadatas = []
+        files_processed = 0
+
+        for file_path in code_files:
+            try:
+                # Read file content
+                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+
+                if not content.strip():
+                    continue
+
+                # Get relative path from the indexed directory
+                rel_path = os.path.relpath(file_path, directory)
+                file_ext = os.path.splitext(file_path)[1].lower()
+
+                # Determine language from extension
+                language_map = {
+                    ".py": "python", ".js": "javascript", ".ts": "typescript",
+                    ".jsx": "javascript", ".tsx": "typescript", ".java": "java",
+                    ".go": "go", ".rs": "rust", ".cpp": "cpp", ".c": "c",
+                    ".h": "c", ".hpp": "cpp", ".cs": "csharp", ".rb": "ruby",
+                    ".php": "php", ".sql": "sql", ".swift": "swift",
+                    ".kt": "kotlin", ".scala": "scala", ".r": "r",
+                    ".vue": "vue", ".svelte": "svelte", ".sh": "shell",
+                    ".bash": "shell", ".yaml": "yaml", ".yml": "yaml",
+                    ".json": "json", ".xml": "xml", ".html": "html",
+                    ".css": "css", ".scss": "scss", ".md": "markdown",
+                }
+                language = language_map.get(file_ext, "unknown")
+
+                # Create chunks based on chunking strategy
+                chunks = []
+
+                if chunk_by == "file":
+                    # Entire file as one chunk
+                    chunks.append({
+                        "content": content,
+                        "start_line": 1,
+                        "end_line": len(content.splitlines()),
+                        "chunk_type": "file"
+                    })
+
+                elif chunk_by == "function":
+                    # Try to parse functions/classes for Python files
+                    if language == "python":
+                        chunks = _parse_python_chunks(content)
+                    else:
+                        # Fallback to file-level for other languages
+                        chunks.append({
+                            "content": content,
+                            "start_line": 1,
+                            "end_line": len(content.splitlines()),
+                            "chunk_type": "file"
+                        })
+
+                elif chunk_by == "lines":
+                    # Split by line count
+                    lines = content.splitlines(keepends=True)
+                    chunk_lines = []
+                    chunk_start = 1
+
+                    for i, line in enumerate(lines, 1):
+                        chunk_lines.append(line)
+                        current_chunk = "".join(chunk_lines)
+
+                        if len(current_chunk) >= max_chunk_size or i == len(lines):
+                            chunks.append({
+                                "content": current_chunk,
+                                "start_line": chunk_start,
+                                "end_line": i,
+                                "chunk_type": "lines"
+                            })
+                            chunk_lines = []
+                            chunk_start = i + 1
+
+                # Add chunks to collection
+                for chunk in chunks:
+                    chunk_id = str(uuid.uuid4())
+                    chunk_content = chunk["content"]
+
+                    # Create a searchable document with file info and code
+                    document = f"File: {rel_path}\nLanguage: {language}\nLines: {chunk['start_line']}-{chunk['end_line']}\n\n{chunk_content}"
+
+                    metadata = {
+                        "file_path": rel_path,
+                        "full_path": file_path,
+                        "language": language,
+                        "start_line": chunk["start_line"],
+                        "end_line": chunk["end_line"],
+                        "chunk_type": chunk["chunk_type"],
+                        "file_extension": file_ext,
+                    }
+
+                    all_ids.append(chunk_id)
+                    all_documents.append(document)
+                    all_metadatas.append(metadata)
+
+                files_processed += 1
+
+            except Exception as e:
+                logger.warning(f"Failed to process file {file_path}: {e}")
+                continue
+
+        # Batch add to collection (in batches of 100 to avoid memory issues)
+        batch_size = 100
+        total_added = 0
+
+        for i in range(0, len(all_ids), batch_size):
+            batch_ids = all_ids[i:i + batch_size]
+            batch_docs = all_documents[i:i + batch_size]
+            batch_metas = all_metadatas[i:i + batch_size]
+
+            add_result_str = add_data_to_collection(
+                collection_name=collection_name,
+                ids=batch_ids,
+                documents=batch_docs,
+                metadatas=batch_metas,
+            )
+            add_result = json.loads(add_result_str)
+
+            if add_result.get("success"):
+                total_added += len(batch_ids)
+            else:
+                logger.error(f"Failed to add batch: {add_result.get('error')}")
+
+        result["success"] = True
+        result["files_indexed"] = files_processed
+        result["chunks_created"] = total_added
+        result["message"] = (
+            f"Successfully indexed {files_processed} files into {total_added} chunks "
+            f"in collection '{collection_name}'"
+        )
+
+    except Exception as e:
+        result["error"] = f"[Exception]: {e}"
+        logger.error(f"Failed to index code directory: {e}")
+
+    json_result = json.dumps(result, ensure_ascii=False)
+    return json_result
+
+
+def _parse_python_chunks(content: str) -> list[dict]:
+    """
+    Parse Python code into function/class level chunks using AST.
+
+    Returns a list of chunks with content, start_line, end_line, and chunk_type.
+    """
+    import ast
+
+    chunks = []
+
+    try:
+        tree = ast.parse(content)
+        lines = content.splitlines(keepends=True)
+
+        # Find all top-level functions and classes
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                # Only process top-level definitions
+                if hasattr(node, 'lineno'):
+                    start_line = node.lineno
+                    end_line = node.end_lineno if hasattr(node, 'end_lineno') else start_line
+
+                    # Extract the code for this node
+                    chunk_lines = lines[start_line - 1:end_line]
+                    chunk_content = "".join(chunk_lines)
+
+                    chunk_type = "class" if isinstance(node, ast.ClassDef) else "function"
+                    name = node.name if hasattr(node, 'name') else "unknown"
+
+                    chunks.append({
+                        "content": chunk_content,
+                        "start_line": start_line,
+                        "end_line": end_line,
+                        "chunk_type": chunk_type,
+                        "name": name,
+                    })
+
+        # If no functions/classes found, return the whole file
+        if not chunks:
+            chunks.append({
+                "content": content,
+                "start_line": 1,
+                "end_line": len(lines),
+                "chunk_type": "file"
+            })
+
+    except SyntaxError:
+        # If parsing fails, return the whole file as a single chunk
+        chunks.append({
+            "content": content,
+            "start_line": 1,
+            "end_line": len(content.splitlines()),
+            "chunk_type": "file"
+        })
+
+    return chunks
+
+
+@app.tool()
+def search_code(
+    collection_name: str,
+    query: str,
+    n_results: int = 5,
+    language: Optional[str] = None,
+    file_path_contains: Optional[str] = None,
+) -> str:
+    """
+    Search for code in an indexed collection using semantic similarity.
+
+    This tool is designed for AI Coding assistance, allowing you to:
+    - Find similar implementations before writing new code
+    - Search for utility functions by describing what they do
+    - Locate code that handles specific functionality
+    - Avoid code duplication by finding existing solutions
+
+    Args:
+        collection_name: The name of the code index collection (created by index_code_directory).
+        query: Natural language description of what you're looking for.
+               Examples:
+               - "function that validates email addresses"
+               - "error handling for database connections"
+               - "React component for user authentication"
+               - "utility to format dates"
+        n_results: Number of results to return. Default is 5.
+        language: Optional. Filter by programming language (e.g., "python", "javascript", "go").
+        file_path_contains: Optional. Filter by file path substring (e.g., "utils", "components").
+
+    Returns:
+        A JSON string containing:
+        - success: Whether the search was successful
+        - results: List of matching code chunks with file path, content, and relevance
+        - error: Error message if failed
+
+    Examples:
+        - Search for validation functions:
+          search_code("my_project_code", "function that validates user input")
+
+        - Search in Python files only:
+          search_code("my_project_code", "database connection handler", language="python")
+
+        - Search in specific directory:
+          search_code("my_project_code", "API endpoint handler", file_path_contains="api/")
+    """
+    logger.info(
+        f"Calling tool: search_code with arguments: collection_name={collection_name}, query={query}"
+    )
+    result = {
+        "collection_name": collection_name,
+        "query": query,
+        "success": False,
+        "results": None,
+        "error": None,
+    }
+
+    try:
+        # Build where filter for metadata
+        where_filter = {}
+        if language:
+            where_filter["language"] = {"$eq": language}
+        if file_path_contains:
+            where_filter["file_path"] = {"$contains": file_path_contains}
+
+        # Execute query
+        query_kwargs = {
+            "collection_name": collection_name,
+            "query_texts": [query],
+            "n_results": n_results,
+        }
+
+        if where_filter:
+            query_kwargs["where"] = where_filter
+
+        query_result_str = query_collection(**query_kwargs)
+        query_result = json.loads(query_result_str)
+
+        if not query_result.get("success"):
+            result["error"] = query_result.get("error")
+            return json.dumps(result, ensure_ascii=False)
+
+        # Format results for code display
+        data = query_result.get("data", {})
+        ids = data.get("ids", [[]])[0]
+        documents = data.get("documents", [[]])[0]
+        metadatas = data.get("metadatas", [[]])[0]
+        distances = data.get("distances", [[]])[0]
+
+        formatted_results = []
+        for i in range(len(ids)):
+            metadata = metadatas[i] if i < len(metadatas) else {}
+
+            # Extract just the code content (remove the header we added)
+            doc = documents[i] if i < len(documents) else ""
+            code_start = doc.find("\n\n")
+            code_content = doc[code_start + 2:] if code_start != -1 else doc
+
+            formatted_results.append({
+                "id": ids[i],
+                "file_path": metadata.get("file_path", "unknown"),
+                "full_path": metadata.get("full_path", "unknown"),
+                "language": metadata.get("language", "unknown"),
+                "lines": f"{metadata.get('start_line', '?')}-{metadata.get('end_line', '?')}",
+                "chunk_type": metadata.get("chunk_type", "unknown"),
+                "code": code_content,
+                "distance": distances[i] if i < len(distances) else None,
+            })
+
+        result["success"] = True
+        result["results"] = formatted_results
+        result["count"] = len(formatted_results)
+        result["message"] = f"Found {len(formatted_results)} code chunk(s) matching query"
+
+    except Exception as e:
+        result["error"] = f"[Exception]: {e}"
+        logger.error(f"Failed to search code: {e}")
+
+    json_result = json.dumps(result, ensure_ascii=False)
+    return json_result
+
+
+@app.tool()
 def export_csv_file_from_seekdb(name: str, filePath: str) -> str:
     """
     Export data from seekdb to a CSV file.
